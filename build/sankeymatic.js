@@ -1017,6 +1017,16 @@ function render_sankey(allNodes, allFlows, cfg, numberStyle) {
       relativeSizeAdjustment = (cfg.labels_relativesize - 100) / 100,
       nameSize = overallSize * (1 - relativeSizeAdjustment),
       valueSize = overallSize * (1 + relativeSizeAdjustment),
+      total = cfg.labelpercentage_total === 'parent'
+        ? n.flows[IN].reduce((prev, cur) => {
+            return prev + cur.source.value;
+          }, 0)
+        : allNodes.reduce((prev, cur) => {
+            return prev + (cur.flows[IN].length == 0 ? cur.value : 0);
+          }, 0),
+      percentage = cfg.labelpercentage_appears && total != 0
+        ? ` (${Number.parseFloat((n.value / total * 100).toFixed(cfg.labelpercentage_precision))}%)`
+        : '',
       nameParts = String(n.name).split('\\n'), // Use \n for multiline labels
       nameObjs = nameParts.map((part, i) => ({
         txt: part,
@@ -1026,7 +1036,7 @@ function render_sankey(allNodes, allFlows, cfg, numberStyle) {
           || (cfg.labelvalue_appears && cfg.labelvalue_position === 'above'),
       })),
       valObj = {
-        txt: withUnits(n.value),
+        txt: withUnits(n.value) + percentage,
         weight: cfg.labelvalue_weight,
         size: valueSize,
         newLine: (cfg.labelname_appears && cfg.labelvalue_position === 'below'),
