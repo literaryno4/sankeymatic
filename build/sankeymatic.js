@@ -584,6 +584,7 @@ const msg = {
     ['difference', { id: 'imbalance_messages', class: 'differencemessage' }],
     ['total', { id: 'totals_area', class: '' }],
     ['info', { id: 'info_messages', class: 'okmessage' }],
+    ['console', { id: 'console_lines', class: '' }],
   ]),
   add: (msgHTML, msgArea = 'info') => {
     const msgData = msg.areas.get(msgArea) || msg.areas.get('info'),
@@ -594,6 +595,12 @@ const msg = {
 
     el(msgData.id).append(msgDiv);
   },
+  consoleContainer: el('console_area'),
+  log: (msgHTML) => {
+    // Reveal the console if it's hidden:
+    msg.consoleContainer.style.display = '';
+    msg.add(msgHTML, 'console');
+  },
   queue: [],
   addToQueue: (msgHTML, msgArea) => { msg.queue.push([msgHTML, msgArea]); },
   // Clear out any old messages:
@@ -603,6 +610,7 @@ const msg = {
       .forEach((id) => {
         el(id).replaceChildren();
       });
+    msg.consoleContainer.style.display = 'none';
   },
   // If any pending messages have been queued, show them:
   showQueued: () => {
@@ -1070,9 +1078,10 @@ function render_sankey(allNodes, allFlows, cfg, numberStyle) {
           = cfg.labelposition_first === 'before' ? n.stage < bp : n.stage >= bp;
       return anchorAtEnd ? 'end' : 'start';
     }
-    // scheme = 'auto' here. Put the label on the empty side if there is one:
-    if (n.total[IN] === 0) { return 'end'; }
-    if (n.total[OUT] === 0) { return 'start'; }
+    // Scheme = 'auto' here. Put the label on the empty side if there is one.
+    // We check the *count* of flows in/out, because their sum might be 0:
+    if (!n.flows[IN].length) { return 'end'; }
+    if (!n.flows[OUT].length) { return 'start'; }
     switch (cfg.labelposition_autoalign) {
       case -1: return 'end';
       case 1: return 'start';
@@ -1996,43 +2005,50 @@ glob.process_sankey = () => {
 
   // NODE-handling functions:
 
-  // getTrueNodeName: Parse cases where the node name is in strike-through
-  //   format (e.g. '-hidden label-') and return:
-  //   - trueName: the real node name (without minuses, if present)
-  //   - hideLabel: true if the name was struck through
-  function getTrueNodeName(rawName) {
+  /**
+   * Parse the node name to find out if it is in strike-through format
+   * (e.g. '-hidden label-').
+   * @param {string} rawName a node name from the input data
+   * @returns {object} nameInfo
+   * @returns {string} nameInfo.trueName The real node name (without dashes)
+   * @returns {boolean} nameInfo.hideLabel True if the name was struck through
+   */
+  function parseNodeName(rawName) {
     const hiddenNameMatches = rawName.match(/^-(.*)-$/),
       hideThisLabel = hiddenNameMatches !== null,
       trueName = hideThisLabel ? hiddenNameMatches[1] : rawName;
     return { trueName: trueName, hideLabel: hideThisLabel };
   }
 
-  // addNodeName: Make sure a node's name is present in the 'unique' list
-  // with the lowest row number the node has appeared on:
-  function addNodeName(nodeName, row) {
-    const nameInfo = getTrueNodeName(nodeName);
-    // Have we seen this node before?
-    if (uniqueNodes.has(nameInfo.trueName)) {
-      const thisNode = uniqueNodes.get(nameInfo.trueName);
+  /**
+   * Make sure a node's name is present in the main list, with the lowest row
+   * number the node has appeared on.
+   * @param {string} nodeName A raw node name from the input data
+   * @param {number} row The number of the input row the node appeared on.
+   *  (This can be a non-integer; Target node names have 0.5 added to their
+   *  row number.)
+   * @returns {object} The node's object (from uniqueNodes)
+   */
+  function setUpNode(nodeName, row) {
+    const { trueName, hideLabel } = parseNodeName(nodeName),
+      thisNode = uniqueNodes.get(trueName); // Does this node exist?
+    if (thisNode) {
       // If so, should the new row # replace the stored row #?:
       if (thisNode.sourceRow > row) { thisNode.sourceRow = row; }
-      // If ANY instance of the name was struck through, then set hideLabel:
-      thisNode.hideLabel ||= nameInfo.hideLabel;
-    } else {
-      // Set up the node's raw object, keyed to the name:
-      uniqueNodes.set(nameInfo.trueName, {
-        name: nameInfo.trueName,
-        tipname: nameInfo.trueName.replaceAll('\\n', ' '),
-        hideLabel: nameInfo.hideLabel,
-        sourceRow: row,
-        paintInputs: [],
-      });
+      // Update hideLabel if this instance of the name was struck through:
+      thisNode.hideLabel ||= hideLabel;
+      return thisNode;
     }
-  }
-
-  // getUniqueNode: return node 'foo' even when referenced as '-foo-':
-  function getUniqueNode(nodeName) {
-    return uniqueNodes.get(getTrueNodeName(nodeName).trueName);
+    // This is a new Node. Set up its object, keyed to its trueName:
+    const newNode = {
+      name: trueName,
+      tipname: trueName.replaceAll('\\n', ' '),
+      hideLabel: hideLabel,
+      sourceRow: row,
+      paintInputs: [],
+    };
+    uniqueNodes.set(trueName, newNode);
+    return newNode;
   }
 
   // updateNodeAttrs: Update an existing node's attributes.
@@ -2042,7 +2058,8 @@ glob.process_sankey = () => {
     // Just in case this is the first appearance of the name (or we've
     // encountered an earlier row than the node declaration), add it to
     // the big list:
-    addNodeName(nodeParams.name, nodeParams.sourceRow);
+    const thisNode = setUpNode(nodeParams.name, nodeParams.sourceRow);
+
     // We've already used the 'sourceRow' value and don't want it to
     // overwrite anything, so take it out of the params object:
     delete nodeParams.sourceRow;
@@ -2053,13 +2070,12 @@ glob.process_sankey = () => {
       nodeParams.color = `#${nodeParams.color}`;
     }
 
-    // Allow for special name syntaxes (like strike-through):
-    const targetNode = getUniqueNode(nodeParams.name);
     // Don't overwrite the 'name' value here, it can mess up tooltips:
     delete nodeParams.name;
+
     Object.entries(nodeParams).forEach(([pName, pVal]) => {
       if (typeof pVal !== 'undefined' && pVal !== null && pVal !== '') {
-        targetNode[pName] = pVal;
+        thisNode[pName] = pVal;
       }
     });
   }
@@ -2181,7 +2197,22 @@ glob.process_sankey = () => {
   //  Parse inputs into: approvedNodes, approvedFlows
   const goodFlows = [],
     approvedNodes = [],
-    approvedFlows = [];
+    approvedFlows = [],
+    SYM_USE_REMAINDER = '*',
+    SYM_FILL_MISSING = '?',
+    reFlowLine = new RegExp(
+      '^(?<sourceNode>.+)'
+      + `\\[(?<amount>[\\d\\s.+-]+|\\${SYM_USE_REMAINDER}|\\${SYM_FILL_MISSING}|)\\]`
+      + '(?<targetNodePlus>.+)$'
+    );
+
+  /**
+   * @param {string} fv A flow's value.
+   * @returns {boolean} True if the value is a special calculation symbol
+   */
+  function flowIsCalculated(fv) {
+    return [SYM_USE_REMAINDER, SYM_FILL_MISSING].includes(fv);
+  }
 
   // Loop through all the non-setting input lines:
   sourceLines.filter((l, i) => !linesWithSettings.has(i))
@@ -2209,16 +2240,27 @@ glob.process_sankey = () => {
     // Does this line look like a Flow?
     matches = lineIn.match(reFlowLine);
     if (matches !== null) {
-      // The Amount looked trivially like a number; reject the line
-      // if it really isn't:
-      const amountIn = matches[2].replace(/\s/g, '');
-      if (!isNumeric(amountIn)) {
-        warnAbout(lineIn, 'The Amount is not a valid decimal number');
+      const amountIn = matches[2].replace(/\s/g, ''),
+        isCalculated = flowIsCalculated(amountIn);
+
+      // Is the Amount actually blank? Treat that like a comment (but log it):
+      if (amountIn === '') {
+        msg.log(`<span class="info_text">Skipped empty flow:</span> ${escapeHTML(lineIn)}`);
         return;
       }
-      // Diagrams don't currently support negative numbers or 0:
-      if (Number(amountIn) <= 0) {
-        warnAbout(lineIn, 'Amounts must be greater than 0');
+
+      // Is Amount a number or a special operation?
+      // Reject the line if it's neither:
+      if (!isNumeric(amountIn) && !isCalculated) {
+        warnAbout(
+          lineIn,
+          `The [Amount] must be a number in the form #.# or a wildcard ("${SYM_USE_REMAINDER}" or "${SYM_FILL_MISSING}").`
+        );
+        return;
+      }
+      // Diagrams don't currently support negative numbers:
+      if (Number(amountIn) < 0) {
+        warnAbout(lineIn, 'Amounts must not be negative');
         return;
       }
 
@@ -2228,6 +2270,8 @@ glob.process_sankey = () => {
         target: matches[3].trim(),
         amount: amountIn,
         sourceRow: row,
+        // Remember any special symbol even after the amount will be known:
+        operation: isCalculated ? amountIn : null,
       });
 
       // We need to know the maximum precision of the inputs (greatest
@@ -2258,17 +2302,23 @@ glob.process_sankey = () => {
     );
   });
 
-  // Make the final list of Flows:
+  // Make the final list of Flows, linked to their Node objects:
   const graphIsReversed = el('layout_reversegraph').checked;
   goodFlows.forEach((flow) => {
-    // Look for extra content about this flow on the target-node end of the
-    // string:
-    let [flowColor, opacity] = ['', ''];
-      // Try to parse; there may be extra info that isn't actually the name:
-    // Format of the Target node can be: Target node [#color[.opacity]]
-    //   e.g. 'x [...] y #99aa00' or 'x [...] y #99aa00.25'
-    // Look for a candidate string starting with # for color info:
-    const flowTargetPlus = flow.target.match(reFlowTargetWithSuffix);
+    const thisFlow = {
+        hovering: false,
+        index: approvedFlows.length,
+        sourceRow: flow.sourceRow,
+        operation: flow.operation,
+        value: flow.amount,
+        color: '', // may be overwritten below
+        opacity: '', // ""
+      },
+      // Try to parse any extra info that isn't actually the target's name.
+      // The format of the Target string can be: "Name [#color[.opacity]]"
+      //   e.g. 'x [...] y #99aa00' or 'x [...] y #99aa00.25'
+      // Look for a candidate string starting with # for color info:
+      flowTargetPlus = flow.target.match(reFlowTargetWithSuffix);
     if (flowTargetPlus !== null) {
       // IFF the # string matches a stricter pattern, separate the target
       // string into parts:
@@ -2279,32 +2329,70 @@ glob.process_sankey = () => {
         // Update the target's name with the trimmed string:
         flow.target = possibleNodeName;
         // If there was a color, adopt it:
-        if (colorOpacity[1]) { flowColor = `#${colorOpacity[1]}`; }
+        if (colorOpacity[1]) { thisFlow.color = `#${colorOpacity[1]}`; }
         // If there was an opacity, adopt it:
-        if (colorOpacity[2]) { opacity = colorOpacity[2]; }
+        if (colorOpacity[2]) { thisFlow.opacity = colorOpacity[2]; }
       }
-      // Otherwise just treat it as part of the nodename, e.g. "Team #1"
+      // Otherwise we will treat it as part of the nodename, e.g. "Team #1"
     }
-    // Make sure the node names get saved; it may be their only appearance:
-    addNodeName(flow.source, flow.sourceRow);
-    addNodeName(flow.target, flow.sourceRow + 0.5);
 
-    // Add the updated flow to the list of approved flows:
-    const f = {
-      index: approvedFlows.length,
-      source: getUniqueNode(flow.source),
-      target: getUniqueNode(flow.target),
-      value: flow.amount,
-      color: flowColor,
-      opacity: opacity,
-      hovering: false,
-      sourceRow: flow.sourceRow,
-    };
+    // Make sure the node names get saved; it may be their only appearance:
+    thisFlow.source = setUpNode(flow.source, flow.sourceRow);
+    thisFlow.target = setUpNode(flow.target, flow.sourceRow + 0.5);
+
     if (graphIsReversed) {
-      [f.source, f.target] = [f.target, f.source];
+      [thisFlow.source, thisFlow.target] = [thisFlow.target, thisFlow.source];
+      // Calculations must also flow in the opposite direction:
+      if (thisFlow.operation) {
+        thisFlow.operation
+          = thisFlow.operation === SYM_USE_REMAINDER
+            ? SYM_FILL_MISSING
+            : SYM_USE_REMAINDER;
+      }
     }
-    approvedFlows.push(f);
+
+    approvedFlows.push(thisFlow);
   });
+
+  // Now that all names are resolved, we can calculate any dependent amounts:
+  approvedFlows
+    .filter((flow) => flow.operation)
+    .forEach((flow) => {
+      // SYM_USE_REMAINDER = Adopt any remainder from this flow's SOURCE
+      // SYM_FILL_MISSING = Adopt any unused amount from this flow's TARGET
+      const [arrivingKey, leavingKey]
+        = flow.operation === SYM_USE_REMAINDER
+          ? ['target', 'source']
+          : ['source', 'target'],
+        parentName = flow[leavingKey].name;
+      let [parentTotal, siblingTotal] = [0, 0];
+      // Find any other flows which touch the 'parent' (i.e. data source).
+      // We check af.value here, *not* .operation, because if a calculation
+      //   has been completed, we want to know about that resulting amount.
+      // (Note: We won't re-process the current flow in this inner loop --
+      //   the first filter will exclude our unresolved .value)
+      approvedFlows
+        .filter(
+          (af) => !flowIsCalculated(af.value)
+            && [af[arrivingKey].name, af[leavingKey].name].includes(parentName)
+        )
+        .forEach((af) => {
+          if (parentName === af[arrivingKey].name) {
+            // Add up amounts arriving at the parent from the other side:
+            parentTotal += Number(af.value);
+          } else {
+            // Add up sibling amounts (flows leaving the parent on our side):
+            siblingTotal += Number(af.value);
+          }
+        });
+      // Update this flow with the calculated amount (preventing negatives):
+      flow.value = Math.max(0, parentTotal - siblingTotal);
+      msg.log(
+        `<span class="info_text">Calculated:</span> ${escapeHTML(
+          `${flow.source.tipname} [${flow.operation}] ${flow.target.tipname}`
+        )} = <span class="calced">${ep(flow.value)}</span>`
+      );
+    });
 
   // Construct the final list of approved_nodes, sorted by their order of
   // appearance in the source:
@@ -2464,9 +2552,9 @@ glob.process_sankey = () => {
   approvedNodes.forEach((n, i) => {
     // Note: After rendering, there are now more keys in the node records,
     // including 'total' and 'value'.
-    // Skip checking any nodes with 0 as the From or To amount; those are
-    // the origins & endpoints for the whole graph and don't qualify:
-    if (n.total[IN] > 0 && n.total[OUT] > 0) {
+    // Skip checking any nodes which don't have flows on both sides -- those
+    // are the origins & endpoints for the whole graph and don't qualify:
+    if (n.flows[IN].length && n.flows[OUT].length) {
       const difference = n.total[IN] - n.total[OUT];
       // Is there a difference big enough to matter? (i.e. > epsilon)
       // We'll always calculate this, even if not shown to the user.
@@ -2478,10 +2566,14 @@ glob.process_sankey = () => {
         });
       }
     } else {
-      // Accumulate totals in & out of the graph
-      // (On this path, one of these values will be 0 every time.)
-      grandTotal[IN] += n.total[IN];
-      grandTotal[OUT] += n.total[OUT];
+      // Accumulate the grand totals in & out of the graph.
+      // (Note: In this clause, at least one of these sides will have 0 flows
+      // every time.)
+      // This logic looks counterintuitive, but:
+      //   The grand total OUT = the sum of all *endpoint* nodes, which means:
+      //     the sum of all IN values for nodes with no OUT flows & vice versa
+      grandTotal[OUT] += n.total[IN];
+      grandTotal[IN] += n.total[OUT];
     }
 
     // Btw, check if this is a new maximum node:
@@ -2557,7 +2649,7 @@ glob.process_sankey = () => {
     // Show this value using the user's units, but override the number of
     // decimal places to show 4 digits of precision:
     unitsPerPixel = formatUserData(
-      maxNodeVal / tallestNodeHeight,
+      maxNodeVal / (tallestNodeHeight || Number.MIN_VALUE),
       { ...numberStyle, decimalPlaces: 4 }
     );
   el('scale_figures').innerHTML
@@ -2587,7 +2679,7 @@ glob.process_sankey();
  userDataMarker sourceHeaderPrefix sourceURLLine
  skmSettings colorGray60 userInputsField breakpointField
  reWholeNumber reHalfNumber reInteger reDecimal reYesNo reYes
- reCommentLine reSettingsValue reSettingsText reNodeLine reFlowLine
+ reCommentLine reSettingsValue reSettingsText reNodeLine
  reMoveLine movesMarker
  reFlowTargetWithSuffix reColorPlusOpacity
  reBareColor reRGBColor LZString */
